@@ -18,6 +18,12 @@ const COLORS = {
   regionBorder: 0x5a8aaa,
 } as const;
 
+const TEXT_NORMAL = '#aabbcc';
+const TEXT_OVERLIMIT = '#ff4444';
+const TEXT_VERIFIED = '#44cc66';
+
+const TOTAL_CELLS = BOARD_SIZE * BOARD_SIZE;
+
 export class GameScene extends Phaser.Scene {
   private board!: BoardState;
   private boardData!: BoardData;
@@ -27,6 +33,8 @@ export class GameScene extends Phaser.Scene {
   private isMarking = false;
   private isPanning = false;
   private markIntent: 'mark' | 'unmark' | null = null;
+  /** 拖拽锁定的区域编号，-1 表示未锁定 */
+  private markRegionId = -1;
   private lastMarkedCell = -1;
   private panStartX = 0;
   private panStartY = 0;
@@ -34,8 +42,8 @@ export class GameScene extends Phaser.Scene {
   private panStartScrollY = 0;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: { W: Phaser.Input.Keyboard.Key; A: Phaser.Input.Keyboard.Key; S: Phaser.Input.Keyboard.Key; D: Phaser.Input.Keyboard.Key };
-  /** 数字标签（世界空间独立对象） */
-  private numberTexts: Phaser.GameObjects.Text[] = [];
+  /** 按 cellIndex 索引的数字 Text，null 表示不可见 */
+  private numberTexts: (Phaser.GameObjects.Text | null)[] = [];
 
   constructor() {
     super({ key: 'GameScene' });
@@ -45,6 +53,7 @@ export class GameScene extends Phaser.Scene {
     this.board = new BoardState(BOARD_SIZE);
     this.sfx = new SoundManager();
     this.worldSize = BOARD_SIZE * CELL_SIZE;
+    this.numberTexts = new Array<Phaser.GameObjects.Text | null>(TOTAL_CELLS).fill(null);
 
     this.boardData = generateBoard({
       size: BOARD_SIZE,
@@ -53,7 +62,6 @@ export class GameScene extends Phaser.Scene {
       typeARatio: 0.5,
     });
 
-    // 棋盘纹理
     this.boardImage = this.add.renderTexture(0, 0, this.worldSize, this.worldSize);
     this.boardImage.setOrigin(0, 0);
 
@@ -103,6 +111,7 @@ export class GameScene extends Phaser.Scene {
       this.isMarking = false;
       this.isPanning = false;
       this.markIntent = null;
+      this.markRegionId = -1;
       this.lastMarkedCell = -1;
     });
 
@@ -128,6 +137,7 @@ export class GameScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-R', () => {
       this.board.reset();
       this.drawFullBoard();
+      this.resetOverlimit();
     });
 
     this.input.keyboard?.on('keydown-N', () => {
@@ -165,6 +175,10 @@ export class GameScene extends Phaser.Scene {
     const pointer = this.input.activePointer;
     const col = Math.floor(pointer.worldX / CELL_SIZE);
     const row = Math.floor(pointer.worldY / CELL_SIZE);
+
+    const cellData = this.boardData.getCell(row, col);
+    this.markRegionId = cellData ? cellData.regionId : -1;
+
     if (!this.board.inBounds(row, col)) { this.markIntent = 'mark'; return; }
 
     const old = this.board.getMark(row, col);
@@ -184,6 +198,10 @@ export class GameScene extends Phaser.Scene {
     const idx = row * BOARD_SIZE + col;
     if (idx === this.lastMarkedCell) return;
 
+    // 不跨区域操作
+    const cellData = this.boardData.getCell(row, col);
+    if (!cellData || cellData.regionId !== this.markRegionId) return;
+
     const oldMark = this.board.getMark(row, col);
     const isRight = pointer.rightButtonDown();
     let newMark: CellMark = oldMark;
@@ -200,6 +218,64 @@ export class GameScene extends Phaser.Scene {
       this.lastMarkedCell = idx;
       this.playMarkSound(newMark);
       this.drawCell(row, col);
+      this.checkAffectedOverlimit(row, col);
+    }
+  }
+
+  // ---- 超标判定 ----
+
+  /** 检查受到 (row,col) 标记影响的所有格子是否超标，并更新数字颜色 */
+  private checkAffectedOverlimit(row: number, col: number): void {
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const nr = row + dr;
+        const nc = col + dc;
+        if (!this.boardData.inBounds(nr, nc)) continue;
+        this.updateOverlimit(nr, nc);
+      }
+    }
+  }
+
+  private updateOverlimit(row: number, col: number): void {
+    const cell = this.boardData.getCell(row, col);
+    if (!cell || !cell.visible) return;
+
+    const neighbors = this.boardData.getSameRegionNeighbors(row, col);
+    let countA = 0;
+    let countB = 0;
+    let allMarked = true;
+
+    for (const n of neighbors) {
+      const mark = this.board.getMark(n.row, n.col);
+      if (mark === CellMark.None) allMarked = false;
+      else if (mark === CellMark.A) countA++;
+      else if (mark === CellMark.B) countB++;
+    }
+
+    const overA = countA > cell.number;
+    const overB = countB > (cell.m - cell.number);
+
+    let color = TEXT_NORMAL;
+    if (overA || overB) {
+      color = TEXT_OVERLIMIT;
+    } else if (allMarked && countA === cell.number && countB === (cell.m - cell.number)) {
+      // 九宫格区域内全部标记完成且与数字完全匹配 → 验证正确
+      color = TEXT_VERIFIED;
+    }
+
+    const text = this.numberTexts[row * BOARD_SIZE + col];
+    if (text) {
+      text.setColor(color);
+    }
+  }
+
+  /** 重置所有数字颜色 */
+  private resetOverlimit(): void {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const text = this.numberTexts[r * BOARD_SIZE + c];
+        if (text) text.setColor(TEXT_NORMAL);
+      }
     }
   }
 
@@ -262,7 +338,6 @@ export class GameScene extends Phaser.Scene {
     g.destroy();
   }
 
-  /** 在 Graphics 上绘制区域边界 */
   private drawRegionBorders(g: Phaser.GameObjects.Graphics): void {
     g.lineStyle(2, COLORS.regionBorder, 0.8);
 
@@ -286,7 +361,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // ---- 数字（世界空间 Text 对象，随相机缩放保持清晰） ----
+  // ---- 数字 ----
 
   private createNumberTexts(): void {
     const fontSize = Math.floor(CELL_SIZE * 0.55);
@@ -301,20 +376,21 @@ export class GameScene extends Phaser.Scene {
 
         const t = this.add.text(cx, cy, cell.number.toString(), {
           fontSize: `${fontSize}px`,
-          color: '#aabbcc',
+          color: TEXT_NORMAL,
           fontFamily: 'monospace',
         });
         t.setOrigin(0.5, 0.5);
-        this.numberTexts.push(t);
+        this.numberTexts[r * BOARD_SIZE + c] = t;
       }
     }
   }
 
   private destroyNumberTexts(): void {
-    for (const t of this.numberTexts) {
-      t.destroy();
+    for (let i = 0; i < TOTAL_CELLS; i++) {
+      const t = this.numberTexts[i];
+      if (t) t.destroy();
+      this.numberTexts[i] = null;
     }
-    this.numberTexts = [];
   }
 
   // ---- 音效 ----
