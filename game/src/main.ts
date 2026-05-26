@@ -9,7 +9,7 @@ const config: Phaser.Types.Core.GameConfig = {
   parent: 'game-container',
   scene: [GameScene],
   scale: {
-    mode: Phaser.Scale.FIT,
+    mode: Phaser.Scale.RESIZE,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
   disableContextMenu: true,
